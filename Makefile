@@ -41,7 +41,8 @@
 #   - unit-test-clean - cleans unit test state (particularly from docker)
 
 PROJECT_NAME   = hyperledger/fabric
-BASE_VERSION   = 1.0.0
+BASE_VERSION   = 1.0.0-alpha3
+PREV_VERSION   = 1.0.0-alpha2
 IS_RELEASE     = false
 
 ifneq ($(IS_RELEASE),true)
@@ -150,7 +151,7 @@ test-cmd:
 docker: $(patsubst %,build/image/%/$(DUMMY), $(IMAGES))
 native: peer orderer configtxgen cryptogen
 
-BEHAVE_ENVIRONMENTS = kafka orderer orderer-1-kafka-1 orderer-1-kafka-3
+BEHAVE_ENVIRONMENTS = kafka orderer-1-kafka-1 orderer-1-kafka-3
 BEHAVE_ENVIRONMENT_TARGETS = $(patsubst %,bddtests/environments/%, $(BEHAVE_ENVIRONMENTS))
 .PHONY: behave-environments $(BEHAVE_ENVIRONMENT_TARGETS)
 behave-environments: $(BEHAVE_ENVIRONMENT_TARGETS)
@@ -190,6 +191,9 @@ build/docker/bin/%: $(PROJECT_FILES)
 
 build/bin:
 	mkdir -p $@
+
+changelog:
+	./scripts/changelog.sh v$(PREV_VERSION) v$(BASE_VERSION)
 
 build/docker/gotools/bin/protoc-gen-go: build/docker/gotools
 

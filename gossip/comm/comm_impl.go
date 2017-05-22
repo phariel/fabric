@@ -145,7 +145,6 @@ func NewCommInstance(s *grpc.Server, cert *tls.Certificate, idStore identity.Map
 }
 
 type commImpl struct {
-	skipHandshake  bool
 	selfCertHash   []byte
 	peerIdentity   api.PeerIdentityType
 	idMapper       identity.Mapper
@@ -154,16 +153,17 @@ type commImpl struct {
 	secureDialOpts func() []grpc.DialOption
 	connStore      *connectionStore
 	PKIID          []byte
-	port           int
 	deadEndpoints  chan common.PKIidType
 	msgPublisher   *ChannelDeMultiplexer
 	lock           *sync.RWMutex
 	lsnr           net.Listener
 	gSrv           *grpc.Server
 	exitChan       chan struct{}
-	stopping       int32
 	stopWG         sync.WaitGroup
 	subscriptions  []chan proto.ReceivedMessage
+	port           int
+	stopping       int32
+	skipHandshake  bool
 }
 
 func (c *commImpl) createConnection(endpoint string, expectedPKIID common.PKIidType) (*connection, error) {
@@ -465,6 +465,7 @@ func (c *commImpl) authenticateRemotePeer(stream stream) (*proto.ConnectionInfo,
 	connInfo := &proto.ConnectionInfo{
 		ID:       receivedMsg.PkiId,
 		Identity: receivedMsg.Cert,
+		Endpoint: remoteAddress,
 	}
 
 	// if TLS is enabled and detected, verify remote peer
@@ -625,7 +626,7 @@ func createGRPCLayer(port int) (*grpc.Server, net.Listener, api.PeerSecureDialOp
 	defer os.Remove(keyFileName)
 	defer os.Remove(certFileName)
 
-	err = generateCertificates(keyFileName, certFileName)
+	err = GenerateCertificates(keyFileName, certFileName)
 	if err == nil {
 		cert, err := tls.LoadX509KeyPair(certFileName, keyFileName)
 		if err != nil {

@@ -213,6 +213,9 @@ class User(Entity, orderer_util.UserRegistration):
         self.tags[tagKey] = tagValue
         return tagValue
 
+    def getTagValue(self, tagKey):
+        return self.tags[tagKey]
+
     def cleanup(self):
         self.closeStreams()
 
@@ -235,18 +238,6 @@ class Organization(Entity):
 
     def getCertAsPEM(self):
         return crypto.dump_certificate(crypto.FILETYPE_PEM, self.getSelfSignedCert())
-
-    def getMSPConfig(self):
-        certPemsList = [crypto.dump_certificate(crypto.FILETYPE_PEM, self.getSelfSignedCert())]
-        # For now, admin certs and CA certs are the same per @ASO
-        adminCerts = certPemsList
-        cacerts = adminCerts
-        # Currently only 1 component, CN=<orgName>
-        # name = self.getSelfSignedCert().get_subject().getComponents()[0][1]
-        name = self.name
-        fabricMSPConfig = msp_config_pb2.FabricMSPConfig(admins=adminCerts, root_certs=cacerts, name=name)
-        mspConfig = msp_config_pb2.MSPConfig(config=fabricMSPConfig.SerializeToString(), type=0)
-        return mspConfig
 
     def isInNetwork(self, network):
         for n in self.networks:
@@ -518,39 +509,6 @@ def getOrdererBootstrapAdminOrgReferences(context):
         ordererBootstrapAdmin.tags['OrgReferences'] = {}
     return ordererBootstrapAdmin.tags['OrgReferences']
 
-
-def getSignedMSPConfigItems(context, orgNames, channel_version=0, application_group_version=0, application_group_policy_version=0):
-    directory = getDirectory(context)
-    orgs = [directory.getOrganization(orgName) for orgName in orgNames]
-
-    channel = common_dot_configtx_pb2.ConfigGroup()
-    channel.version=channel_version
-    channel.groups[ApplicationGroup].version=application_group_version
-    for org in orgs:
-        channel.groups[ApplicationGroup].groups[org.name].version = application_group_version
-        channel.groups[ApplicationGroup].groups[org.name]
-
-    # For now, setting same policies for each 'Non-Org' group
-    typeImplicitMeta = common_dot_policies_pb2.Policy.PolicyType.Value("IMPLICIT_META")
-    Policy = common_dot_policies_pb2.Policy
-    IMP = common_dot_policies_pb2.ImplicitMetaPolicy
-    ruleAny = common_dot_policies_pb2.ImplicitMetaPolicy.Rule.Value("ANY")
-    ruleMajority = common_dot_policies_pb2.ImplicitMetaPolicy.Rule.Value("MAJORITY")
-    for group in [channel.groups[ApplicationGroup]]:
-        group.policies[BootstrapHelper.KEY_POLICY_READERS].policy.CopyFrom(Policy(type=typeImplicitMeta, policy=IMP(
-            rule=ruleAny, sub_policy=BootstrapHelper.KEY_POLICY_READERS).SerializeToString()))
-        group.policies[BootstrapHelper.KEY_POLICY_WRITERS].policy.CopyFrom(Policy(type=typeImplicitMeta, policy=IMP(
-            rule=ruleAny, sub_policy=BootstrapHelper.KEY_POLICY_WRITERS).SerializeToString()))
-        group.policies[BootstrapHelper.KEY_POLICY_ADMINS].policy.CopyFrom(Policy(type=typeImplicitMeta, policy=IMP(
-            rule=ruleMajority, sub_policy=BootstrapHelper.KEY_POLICY_ADMINS).SerializeToString()))
-    for group in [channel.groups[ApplicationGroup]]:
-        group.policies[BootstrapHelper.KEY_POLICY_READERS].version=application_group_policy_version
-        group.policies[BootstrapHelper.KEY_POLICY_WRITERS].version=application_group_policy_version
-        group.policies[BootstrapHelper.KEY_POLICY_ADMINS].version=application_group_policy_version
-
-    return [channel]
-
-
 def getAnchorPeersConfigGroup(context, nodeAdminTuples):
     directory = getDirectory(context)
     config_group = common_dot_configtx_pb2.ConfigGroup()
@@ -564,17 +522,6 @@ def getAnchorPeersConfigGroup(context, nodeAdminTuples):
             #                                           directory.findCertForNodeAdminTuple(nodeAdminTuple))
         config_group.groups[ApplicationGroup].groups[orgName].values[BootstrapHelper.KEY_ANCHOR_PEERS].value=toValue(anchorPeers)
     return [config_group]
-
-def createSignedConfigItems(directory, consensus_type, consortium_name, version=1, channel_version=0, channel_consortium_version=0, configGroups=[]):
-    channelConfig = common_dot_configtx_pb2.ConfigGroup()
-    channelConfig.values[BootstrapHelper.KEY_CONSORTIUM].version=channel_consortium_version
-    channelConfig.values[BootstrapHelper.KEY_CONSORTIUM].value=toValue(common_dot_configuration_pb2.Consortium(name=consortium_name))
-    channelConfig.version = channel_version
-    channelConfig.groups[ApplicationGroup].version = version
-    for configGroup in configGroups:
-        mergeConfigGroups(channelConfig, configGroup)
-    return channelConfig
-
 
 def setDefaultPoliciesForOrgs(channel, orgs, group_name, version=0, policy_version=0):
     for org in orgs:
@@ -607,7 +554,7 @@ def setDefaultPoliciesForOrgs(channel, orgs, group_name, version=0, policy_versi
 
 
 
-def createChannelConfigGroup(directory, hashingAlgoName="SHA256", consensusType="solo", batchTimeout="1s", batchSizeMaxMessageCount=10, batchSizeAbsoluteMaxBytes=100000000, batchSizePreferredMaxBytes=512 * 1024, channel_max_count=0):
+def createChannelConfigGroup(directory, service_names, hashingAlgoName="SHA256", consensusType="solo", batchTimeout="1s", batchSizeMaxMessageCount=10, batchSizeAbsoluteMaxBytes=100000000, batchSizePreferredMaxBytes=512 * 1024, channel_max_count=0):
 
     channel = common_dot_configtx_pb2.ConfigGroup()
     # channel.groups[ApplicationGroup] = common_dot_configtx_pb2.ConfigGroup()
@@ -657,14 +604,14 @@ def createChannelConfigGroup(directory, hashingAlgoName="SHA256", consensusType=
     # Add the orderer org groups MSPConfig info
     for ordererOrg in [org for org in directory.getOrganizations().values() if Network.Orderer in org.networks]:
         channel.groups[OrdererGroup].groups[ordererOrg.name].values[BootstrapHelper.KEY_MSP_INFO].value = toValue(
-            ordererOrg.getMSPConfig())
+            getMSPConfig(org=ordererOrg, directory=directory))
         channel.groups[OrdererGroup].groups[ordererOrg.name].values[BootstrapHelper.KEY_MSP_INFO].mod_policy=BootstrapHelper.KEY_POLICY_ADMINS
-    # #Kafka specific
-    # matchingNATs = [nat for nat in directory.getNamedCtxTuples() if (("orderer" in nat.user) and ("Signer" in nat.user) and ((compose_service in nat.nodeName)))]
-    # for broker in [org for org in directory.getOrganizations().values() if Network.Orderer in org.networks]:
-    #     channel.groups[OrdererGroup].groups[ordererOrg.name].values[BootstrapHelper.KEY_MSP_INFO].value = toValue(
-    #         ordererOrg.getMSPConfig())
-    # channel.groups[OrdererGroup].values[BootstrapHelper.KEY_ORDERER_KAFKA_BROKERS].value = toValue(orderer_dot_configuration_pb2.KafkaBrokers(brokers=["kafka0:9092"]))
+
+    #Kafka specific
+    kafka_brokers = ["{0}:9092".format(service_name) for service_name in service_names if "kafka" in service_name]
+    if len(kafka_brokers) > 0:
+        channel.groups[OrdererGroup].values[BootstrapHelper.KEY_ORDERER_KAFKA_BROKERS].value = toValue(
+            orderer_dot_configuration_pb2.KafkaBrokers(brokers=kafka_brokers))
 
     for vKey, vVal in channel.groups[OrdererGroup].values.iteritems():
         vVal.mod_policy=BootstrapHelper.KEY_POLICY_ADMINS
@@ -678,9 +625,8 @@ def createChannelConfigGroup(directory, hashingAlgoName="SHA256", consensusType=
 
     #New OrdererAddress
     ordererAddress = common_dot_configuration_pb2.OrdererAddresses()
-    for ordererNodeTuple, cert in [(user_node_tuple, cert) for user_node_tuple, cert in directory.ordererAdminTuples.iteritems() if
-                      "orderer" in user_node_tuple.user and "signer" in user_node_tuple.user.lower()]:
-        ordererAddress.addresses.append("{0}:7050".format(ordererNodeTuple.nodeName))
+    for orderer_service_name in [service_name for service_name in service_names if "orderer" in service_name]:
+        ordererAddress.addresses.append("{0}:7050".format(orderer_service_name))
     assert len(ordererAddress.addresses) > 0, "No orderer nodes were found while trying to create channel ConfigGroup"
     channel.values[BootstrapHelper.KEY_ORDERER_ADDRESSES].value = toValue(ordererAddress)
 
@@ -751,19 +697,15 @@ def mergeConfigGroups(configGroupTarget, configGroupSource):
         configGroupTarget.values[k].CopyFrom(v)
 
 
-def createGenesisBlock(context, chainId, consensusType, nodeAdminTuple, signedConfigItems=[]):
+def createGenesisBlock(context, service_names, chainId, consensusType, nodeAdminTuple, signedConfigItems=[]):
     'Generates the genesis block for starting the oderers and for use in the chain config transaction by peers'
     # assert not "bootstrapGenesisBlock" in context,"Genesis block already created:\n{0}".format(context.bootstrapGenesisBlock)
     directory = getDirectory(context)
     assert len(directory.ordererAdminTuples) > 0, "No orderer admin tuples defined!!!"
 
-    channelConfig = createChannelConfigGroup(directory=directory, consensusType=consensusType)
+    channelConfig = createChannelConfigGroup(directory=directory, service_names=service_names, consensusType=consensusType)
     for configGroup in signedConfigItems:
         mergeConfigGroups(channelConfig, configGroup)
-
-    # (fileName, fileExist) = ContextHelper.GetHelper(context=context).getTmpPathForName(name="t",extension="protobuf")
-    # with open(fileName, 'w') as f:
-    #     f.write(channelConfig.SerializeToString())
 
     config = common_dot_configtx_pb2.Config(
         sequence=0,
@@ -806,6 +748,20 @@ class PathType(Enum):
     'Denotes whether Path relative to Local filesystem or Containers volume reference.'
     Local = 1
     Container = 2
+
+
+def getMSPConfig(org, directory):
+    adminCerts = [org.getCertAsPEM()]
+    # Find the mspAdmin Tuple for org and add to admincerts folder
+    for pnt, cert in [(nat, cert) for nat, cert in directory.ordererAdminTuples.items() if
+                      org.name == nat.organization and "configadmin" in nat.nodeName.lower()]:
+        adminCerts.append(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+    cacerts = [org.getCertAsPEM()]
+    # Currently only 1 component, CN=<orgName>
+    # name = self.getSelfSignedCert().get_subject().getComponents()[0][1]
+    fabricMSPConfig = msp_config_pb2.FabricMSPConfig(admins=adminCerts, root_certs=cacerts, name=org.name)
+    mspConfig = msp_config_pb2.MSPConfig(config=fabricMSPConfig.SerializeToString(), type=0)
+    return mspConfig
 
 
 class CallbackHelper:
@@ -958,8 +914,8 @@ class OrdererGensisBlockCompositionCallback(compose.CompositionCallback, Callbac
             (keyPath, certPath) = self.getTLSKeyPaths(pnt=pnt, composition=composition, compose_service=ordererService, pathType=PathType.Container)
             env["{0}_ORDERER_GENERAL_TLS_CERTIFICATE".format(ordererService.upper())] = certPath
             env["{0}_ORDERER_GENERAL_TLS_PRIVATEKEY".format(ordererService.upper())] = keyPath
-            # env["{0}_ORDERER_GENERAL_TLS_ROOTCAS".format(ordererService.upper())] = "[{0}]".format(self.getLocalMspConfigRootCertPath(
-            #     directory=directory, composition=composition, compose_service=ordererService, pathType=PathType.Container))
+            env["{0}_ORDERER_GENERAL_TLS_ROOTCAS".format(ordererService.upper())] = "[{0}]".format(self.getLocalMspConfigRootCertPath(
+                directory=directory, composition=composition, compose_service=ordererService, pathType=PathType.Container))
 
 class PeerCompositionCallback(compose.CompositionCallback, CallbackHelper):
     'Responsible for setting up Peer nodes upon composition'
@@ -1005,14 +961,81 @@ class PeerCompositionCallback(compose.CompositionCallback, CallbackHelper):
             env["{0}_CORE_PEER_TLS_SERVERHOSTOVERRIDE".format(peerService.upper())] = peerService
 
 
-def createConsortium(context, consortium_name, org_names):
+def getDefaultConsortiumGroup(consortiums_mod_policy):
+    default_config_group = common_dot_configtx_pb2.ConfigGroup()
+    default_config_group.groups[ConsortiumsGroup].mod_policy=consortiums_mod_policy
+    return default_config_group
+
+
+def create_config_update_envelope(config_update):
+    return  common_dot_configtx_pb2.ConfigUpdateEnvelope(config_update=config_update.SerializeToString(), signatures =[])
+
+def create_orderer_consortium_config_update(orderer_system_chain_id, orderer_channel_group, config_groups):
+    'Creates the orderer config update'
+    # First determine read set
+    read_set = common_dot_configtx_pb2.ConfigGroup()
+    read_set.groups[ConsortiumsGroup].CopyFrom(orderer_channel_group.groups[ConsortiumsGroup])
+
+    write_set = common_dot_configtx_pb2.ConfigGroup()
+    write_set.groups[ConsortiumsGroup].CopyFrom(orderer_channel_group.groups[ConsortiumsGroup])
+    write_set.groups[ConsortiumsGroup].version += 1
+    for config_group in config_groups:
+        mergeConfigGroups(write_set, config_group)
+    config_update = common_dot_configtx_pb2.ConfigUpdate(channel_id=orderer_system_chain_id,
+                                                        read_set=read_set,
+                                                        write_set=write_set)
+    # configUpdateEnvelope = common_dot_configtx_pb2.ConfigUpdateEnvelope(config_update=configUpdate.SerializeToString(), signatures =[])
+    return config_update
+
+def create_channel_config_update(system_channel_version, channel_id, consortium_config_group):
+    read_set = common_dot_configtx_pb2.ConfigGroup()
+    read_set.version = system_channel_version
+    read_set.values[BootstrapHelper.KEY_CONSORTIUM].value=toValue(common_dot_configuration_pb2.Consortium(name=consortium_config_group.groups[ConsortiumsGroup].groups.keys()[0]))
+
+    # Copying all of the consortium orgs into the ApplicationGroup
+    read_set.groups[ApplicationGroup].CopyFrom(consortium_config_group.groups[ConsortiumsGroup].groups.values()[0])
+    read_set.groups[ApplicationGroup].values.clear()
+    read_set.groups[ApplicationGroup].policies.clear()
+    read_set.groups[ApplicationGroup].mod_policy=""
+    for k, v in read_set.groups[ApplicationGroup].groups.iteritems():
+        v.values.clear()
+        v.policies.clear()
+        v.mod_policy=""
+
+    # Now the write_set
+    write_set = common_dot_configtx_pb2.ConfigGroup()
+    write_set.CopyFrom(read_set)
+    write_set.groups[ApplicationGroup].version += 1
+    # For now, setting same policies for each 'Non-Org' group
+    typeImplicitMeta = common_dot_policies_pb2.Policy.PolicyType.Value("IMPLICIT_META")
+    Policy = common_dot_policies_pb2.Policy
+    IMP = common_dot_policies_pb2.ImplicitMetaPolicy
+    ruleAny = common_dot_policies_pb2.ImplicitMetaPolicy.Rule.Value("ANY")
+    ruleMajority = common_dot_policies_pb2.ImplicitMetaPolicy.Rule.Value("MAJORITY")
+    write_set.groups[ApplicationGroup].policies[BootstrapHelper.KEY_POLICY_READERS].policy.CopyFrom(
+        Policy(type=typeImplicitMeta, policy=IMP(
+            rule=ruleAny, sub_policy=BootstrapHelper.KEY_POLICY_READERS).SerializeToString()))
+    write_set.groups[ApplicationGroup].policies[BootstrapHelper.KEY_POLICY_WRITERS].policy.CopyFrom(
+        Policy(type=typeImplicitMeta, policy=IMP(
+            rule=ruleAny, sub_policy=BootstrapHelper.KEY_POLICY_WRITERS).SerializeToString()))
+    write_set.groups[ApplicationGroup].policies[BootstrapHelper.KEY_POLICY_ADMINS].policy.CopyFrom(
+        Policy(type=typeImplicitMeta, policy=IMP(
+            rule=ruleMajority, sub_policy=BootstrapHelper.KEY_POLICY_ADMINS).SerializeToString()))
+    write_set.groups[ApplicationGroup].mod_policy = "Admins"
+    config_update = common_dot_configtx_pb2.ConfigUpdate(channel_id=channel_id,
+                                                         read_set=read_set,
+                                                         write_set=write_set)
+    return config_update
+
+def createConsortium(context, consortium_name, org_names, mod_policy):
     channel = common_dot_configtx_pb2.ConfigGroup()
     directory = getDirectory(context=context)
+    channel.groups[ConsortiumsGroup].groups[consortium_name].mod_policy = mod_policy
     # Add the orderer org groups MSPConfig info to consortiums group
     for consortium_org in [org for org in directory.getOrganizations().values() if org.name in org_names]:
         # channel.groups[ConsortiumsGroup].groups[consortium_name].groups[consortium_org.name].mod_policy = BootstrapHelper.KEY_POLICY_ADMINS
         channel.groups[ConsortiumsGroup].groups[consortium_name].groups[consortium_org.name].values[BootstrapHelper.KEY_MSP_INFO].value = toValue(
-            consortium_org.getMSPConfig())
+            getMSPConfig(org=consortium_org, directory=directory))
         channel.groups[ConsortiumsGroup].groups[consortium_name].groups[consortium_org.name].values[BootstrapHelper.KEY_MSP_INFO].mod_policy=BootstrapHelper.KEY_POLICY_ADMINS
     typeImplicitMeta = common_dot_policies_pb2.Policy.PolicyType.Value("IMPLICIT_META")
     Policy = common_dot_policies_pb2.Policy
@@ -1038,6 +1061,33 @@ def broadcastCreateChannelConfigTx(context, certAlias, composeService, chainId, 
     user.broadcastMessages(context=context, numMsgsToBroadcast=1, composeService=composeService, chainID=chainId,
                            dataFunc=dataFunc)
 
+def get_latest_configuration_block(deliverer_stream_helper, channel_id):
+    latest_config_block = None
+    deliverer_stream_helper.seekToRange(chainID=channel_id, start="Newest", end="Newest")
+    blocks = deliverer_stream_helper.getBlocks()
+    assert len(blocks) == 1, "Expected single block, received: {0} blocks".format(len(blocks))
+    newest_block = blocks[0]
+    last_config = common_dot_common_pb2.LastConfig()
+    last_config.ParseFromString(newest_block.metadata.metadata[common_dot_common_pb2.BlockMetadataIndex.Value('LAST_CONFIG')])
+    if last_config.index == newest_block.header.number:
+        latest_config_block = newest_block
+    else:
+        deliverer_stream_helper.seekToRange(chainID=channel_id, start=last_config.index, end=last_config.index)
+        blocks = deliverer_stream_helper.getBlocks()
+        assert len(blocks) == 1, "Expected single block, received: {0} blocks".format(len(blocks))
+        assert len(block.data.data) == 1, "Expected single transaction for configuration block, instead found {0} transactions".format(len(block.data.data))
+        latest_config_block = blocks[0]
+    return latest_config_block
+
+def get_channel_group_from_config_block(block):
+    assert len(block.data.data) == 1, "Expected single transaction for configuration block, instead found {0} transactions".format(len(block.data.data))
+    e = common_dot_common_pb2.Envelope()
+    e.ParseFromString(block.data.data[0])
+    p = common_dot_common_pb2.Payload()
+    p.ParseFromString(e.payload)
+    config_envelope = common_dot_configtx_pb2.ConfigEnvelope()
+    config_envelope.ParseFromString(p.data)
+    return config_envelope.config.channel_group
 
 def getArgsFromContextForUser(context, userName):
     directory = getDirectory(context)

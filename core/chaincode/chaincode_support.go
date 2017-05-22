@@ -49,7 +49,6 @@ const (
 	// DevModeUserRunsChaincode property allows user to run chaincode in development environment
 	DevModeUserRunsChaincode       string = "dev"
 	chaincodeStartupTimeoutDefault int    = 5000
-	chaincodeInstallPathDefault    string = "/opt/gopath/bin/"
 	peerAddressDefault             string = "0.0.0.0:7051"
 
 	//TXSimulatorKey is used to attach ledger simulation context
@@ -217,10 +216,8 @@ type ChaincodeSupport struct {
 	runningChaincodes *runningChaincodes
 	peerAddress       string
 	ccStartupTimeout  time.Duration
-	userRunsCC        bool
 	peerNetworkID     string
 	peerID            string
-	peerTLS           bool
 	peerTLSCertFile   string
 	peerTLSKeyFile    string
 	peerTLSSvrHostOrd string
@@ -229,6 +226,8 @@ type ChaincodeSupport struct {
 	shimLogLevel      string
 	logFormat         string
 	executetimeout    time.Duration
+	userRunsCC        bool
+	peerTLS           bool
 }
 
 // DuplicateChaincodeHandlerError returned if attempt to register same chaincodeID while a stream already exists.

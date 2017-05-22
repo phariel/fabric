@@ -37,6 +37,10 @@ logging:
     error:      warning
     msp:        warning
     gossip:     warning
+    grpc:       warning
+    ledger:     warning
+    policies:   warning
+    cauthdsl:   warning
 
     format: '%{color}%{time:2006-01-02 15:04:05.000 MST} [%{module}] %{shortfunc} -> %{level:.4s} %{id:03x}%{color:reset} %{message}'
 
@@ -62,7 +66,7 @@ peer:
     address: 0.0.0.0:7051
     # Whether the Peer should programmatically determine its address
     # This case is useful for docker containers.
-    addressAutoDetect: true
+    addressAutoDetect: false
 
     # Setting for runtime.GOMAXPROCS(n). If n < 1, it does not change the current setting
     gomaxprocs: -1
@@ -358,7 +362,7 @@ chaincode:
     # chaincode/importsysccs.go
     system:
         cscc: enable
-        lccc: enable
+        lscc: enable
         escc: enable
         vscc: enable
         qscc: enable

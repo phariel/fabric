@@ -25,6 +25,8 @@ import (
 
 	"errors"
 
+	"bytes"
+
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/chaincode"
@@ -152,6 +154,50 @@ func (e *Endorser) callChaincode(ctxt context.Context, chainID string, version s
 	return res, ccevent, err
 }
 
+//TO BE REMOVED WHEN JAVA CC IS ENABLED
+//disableJavaCCInst if trying to install, instantiate or upgrade Java CC
+func (e *Endorser) disableJavaCCInst(cid *pb.ChaincodeID, cis *pb.ChaincodeInvocationSpec) error {
+	//if not lscc we don't care
+	if cid.Name != "lscc" {
+		return nil
+	}
+
+	//non-nil spec ? leave it to callers to handle error if this is an error
+	if cis.ChaincodeSpec == nil || cis.ChaincodeSpec.Input == nil {
+		return nil
+	}
+
+	//should at least have a command arg, leave it to callers if this is an error
+	if len(cis.ChaincodeSpec.Input.Args) < 1 {
+		return nil
+	}
+
+	var argNo int
+	switch string(cis.ChaincodeSpec.Input.Args[0]) {
+	case "install":
+		argNo = 1
+	case "deploy", "upgrade":
+		argNo = 2
+	default:
+		//what else can it be ? leave it caller to handle it if error
+		return nil
+	}
+
+	//the inner dep spec will contain the type
+	cds, err := putils.GetChaincodeDeploymentSpec(cis.ChaincodeSpec.Input.Args[argNo])
+	if err != nil {
+		return err
+	}
+
+	//finally, if JAVA error out
+	if cds.ChaincodeSpec.Type == pb.ChaincodeSpec_JAVA {
+		return fmt.Errorf("Java chaincode is work-in-progress and disabled")
+	}
+
+	//not a java install, instantiate or upgrade op
+	return nil
+}
+
 //simulate the proposal by calling the chaincode
 func (e *Endorser) simulateProposal(ctx context.Context, chainID string, txid string, signedProp *pb.SignedProposal, prop *pb.Proposal, cid *pb.ChaincodeID, txsim ledger.TxSimulator) (*ccprovider.ChaincodeData, *pb.Response, []byte, *pb.ChaincodeEvent, error) {
 	//we do expect the payload to be a ChaincodeInvocationSpec
@@ -162,21 +208,53 @@ func (e *Endorser) simulateProposal(ctx context.Context, chainID string, txid st
 		return nil, nil, nil, nil, err
 	}
 
+	//disable Java install,instantiate,upgrade for now
+	if err = e.disableJavaCCInst(cid, cis); err != nil {
+		return nil, nil, nil, nil, err
+	}
+
 	//---1. check ESCC and VSCC for the chaincode
 	if err = e.checkEsccAndVscc(prop); err != nil {
 		return nil, nil, nil, nil, err
 	}
 
-	var cd *ccprovider.ChaincodeData
+	var cdLedger *ccprovider.ChaincodeData
+	var version string
 
-	//default it to a system CC
-	version := util.GetSysCCVersion()
 	if !syscc.IsSysCC(cid.Name) {
-		cd, err = e.getCDSFromLSCC(ctx, chainID, txid, signedProp, prop, cid.Name, txsim)
+		cdLedger, err = e.getCDSFromLSCC(ctx, chainID, txid, signedProp, prop, cid.Name, txsim)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("failed to obtain cds for %s - %s", cid.Name, err)
 		}
-		version = cd.Version
+		version = cdLedger.Version
+
+		// we retrieve info about this chaincode from the file system
+		ccpack, err := ccprovider.GetChaincodeFromFS(cid.Name, version)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("Chaincode data for cc %s/%s was not found, error %s", cid.Name, version, err)
+		}
+		// ccpack is guaranteed to be non-nil
+		cdLocalFS := ccpack.GetChaincodeData()
+
+		// we have the info from the fs, check that the policy
+		// matches the one on the file system if one was specified;
+		// this check is required because the admin of this peer
+		// might have specified instantiation policies for their
+		// chaincode, for example to make sure that the chaincode
+		// is only instantiated on certain channels; a malicious
+		// peer on the other hand might have created a deploy
+		// transaction that attempts to bypass the instantiation
+		// policy. This check is there to ensure that this will not
+		// happen, i.e. that the peer will refuse to invoke the
+		// chaincode under these conditions. More info on
+		// https://jira.hyperledger.org/browse/FAB-3156
+		if cdLocalFS.InstantiationPolicy != nil {
+			if !bytes.Equal(cdLocalFS.InstantiationPolicy, cdLedger.InstantiationPolicy) {
+				return nil, nil, nil, nil, fmt.Errorf("Instantiation policy mismatch for cc %s/%s", cid.Name, version)
+			}
+		}
+	} else {
+		version = util.GetSysCCVersion()
 	}
 
 	//---3. execute the proposal and get simulation results
@@ -194,7 +272,7 @@ func (e *Endorser) simulateProposal(ctx context.Context, chainID string, txid st
 		}
 	}
 
-	return cd, res, simResult, ccevent, nil
+	return cdLedger, res, simResult, ccevent, nil
 }
 
 func (e *Endorser) getCDSFromLSCC(ctx context.Context, chainID string, txid string, signedProp *pb.SignedProposal, prop *pb.Proposal, chaincodeID string, txsim ledger.TxSimulator) (*ccprovider.ChaincodeData, error) {

@@ -66,8 +66,8 @@ func (r *Resources) ApplicationConfig() config.Application {
 	return r.ApplicationConfigVal
 }
 
-func (r *Resources) ConsortiumsConfig() config.Consortiums {
-	return r.ConsortiumsConfigVal
+func (r *Resources) ConsortiumsConfig() (config.Consortiums, bool) {
+	return r.ConsortiumsConfigVal, r.ConsortiumsConfigVal != nil
 }
 
 // Returns the MSPManagerVal
@@ -177,7 +177,7 @@ type Manager struct {
 	// ProposeConfigUpdateError is returned as the error value for ProposeConfigUpdate
 	ProposeConfigUpdateError error
 
-	// ProposeConfigUpdateVal returns as the value for ProposeConfigUpdate
+	// ProposeConfigUpdateVal is returns as the value for ProposeConfigUpdate
 	ProposeConfigUpdateVal *cb.ConfigEnvelope
 
 	// ConfigEnvelopeVal is returned as the value for ConfigEnvelope()

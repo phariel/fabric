@@ -19,7 +19,6 @@ package peer
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"sync"
 
@@ -93,6 +92,12 @@ func MockInitialize() {
 
 var chainInitializer func(string)
 
+var mockMSPIDGetter func(string) []string
+
+func MockSetMSPIDGetter(mspIDGetter func(string) []string) {
+	mockMSPIDGetter = mspIDGetter
+}
+
 // Initialize sets up any chains that the peer has from the persistence. This
 // function should be called at the start up when the ledger and gossip
 // ready
@@ -139,41 +144,32 @@ func InitChain(cid string) {
 }
 
 func getCurrConfigBlockFromLedger(ledger ledger.PeerLedger) (*common.Block, error) {
-	// Config blocks contain only 1 transaction, so we look for 1-tx
-	// blocks and check the transaction type
-	var envelope *common.Envelope
-	var tx *common.Payload
-	var block *common.Block
-	var err error
-	var currBlockNumber uint64 = math.MaxUint64
-	for currBlockNumber >= 0 {
-		if block, err = ledger.GetBlockByNumber(currBlockNumber); err != nil {
-			return nil, err
-		}
-		if block.Data != nil && len(block.Data.Data) == 1 {
-			if envelope, err = utils.ExtractEnvelope(block, 0); err != nil {
-				peerLogger.Warning("Failed to get Envelope from Block %d.", block.Header.Number)
-				currBlockNumber = block.Header.Number - 1
-				continue
-			}
-			if tx, err = utils.ExtractPayload(envelope); err != nil {
-				peerLogger.Warning("Failed to get Payload from Block %d.", block.Header.Number)
-				currBlockNumber = block.Header.Number - 1
-				continue
-			}
-			chdr, err := utils.UnmarshalChannelHeader(tx.Header.ChannelHeader)
-			if err != nil {
-				peerLogger.Warning("Failed to get ChannelHeader from Block %d, error %s.", block.Header.Number, err)
-				currBlockNumber = block.Header.Number - 1
-				continue
-			}
-			if chdr.Type == int32(common.HeaderType_CONFIG) {
-				return block, nil
-			}
-		}
-		currBlockNumber = block.Header.Number - 1
+	peerLogger.Debugf("Getting config block")
+
+	// get last block.  Last block number is Height-1
+	blockchainInfo, err := ledger.GetBlockchainInfo()
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("Failed to find config block.")
+	lastBlock, err := ledger.GetBlockByNumber(blockchainInfo.Height - 1)
+	if err != nil {
+		return nil, err
+	}
+
+	// get most recent config block location from last block metadata
+	configBlockIndex, err := utils.GetLastConfigIndexFromBlock(lastBlock)
+	if err != nil {
+		return nil, err
+	}
+
+	// get most recent config block
+	configBlock, err := ledger.GetBlockByNumber(configBlockIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	peerLogger.Debugf("Got config block[%d]", configBlockIndex)
+	return configBlock, nil
 }
 
 // createChain creates a new chain object and insert it into the chains
@@ -261,8 +257,12 @@ func CreateChainFromBlock(cb *common.Block) error {
 func MockCreateChain(cid string) error {
 	var ledger ledger.PeerLedger
 	var err error
-	if ledger, err = createLedger(cid); err != nil {
-		return err
+
+	if ledger = GetLedger(cid); ledger == nil {
+		gb, _ := configtxtest.MakeGenesisBlock(cid)
+		if ledger, err = ledgermgmt.CreateLedger(gb); err != nil {
+			return err
+		}
 	}
 
 	// Here we need to mock also the policy manager
@@ -377,13 +377,20 @@ func buildTrustedRootsForChain(cm configtxapi.Manager) {
 
 	appRootCAs := [][]byte{}
 	ordererRootCAs := [][]byte{}
+	appOrgMSPs := make(map[string]struct{})
+
+	//loop through app orgs and build map of MSPIDs
+	for _, appOrg := range cm.ApplicationConfig().Organizations() {
+		appOrgMSPs[appOrg.MSPID()] = struct{}{}
+	}
 	cid := cm.ChainID()
+	peerLogger.Debugf("updating root CAs for channel [%s]", cid)
 	msps, err := cm.MSPManager().GetMSPs()
 	if err != nil {
-		peerLogger.Errorf("Error getting getting root CA for channel %s (%s)", cid, err)
+		peerLogger.Errorf("Error getting root CAs for channel %s (%s)", cid, err)
 	}
 	if err == nil {
-		for _, v := range msps {
+		for k, v := range msps {
 			// check to see if this is a FABRIC MSP
 			if v.GetType() == msp.FABRIC {
 				for _, root := range v.GetRootCerts() {
@@ -392,7 +399,14 @@ func buildTrustedRootsForChain(cm configtxapi.Manager) {
 						id := &mspprotos.SerializedIdentity{}
 						err = proto.Unmarshal(sid, id)
 						if err == nil {
-							appRootCAs = append(appRootCAs, id.IdBytes)
+							// check to see of this is an app org MSP
+							if _, ok := appOrgMSPs[k]; ok {
+								peerLogger.Debugf("adding app root CAs for MSP [%s]", k)
+								appRootCAs = append(appRootCAs, id.IdBytes)
+							} else {
+								peerLogger.Debugf("adding orderer root CAs for MSP [%s]", k)
+								ordererRootCAs = append(ordererRootCAs, id.IdBytes)
+							}
 						}
 					}
 				}
@@ -402,14 +416,19 @@ func buildTrustedRootsForChain(cm configtxapi.Manager) {
 						id := &mspprotos.SerializedIdentity{}
 						err = proto.Unmarshal(sid, id)
 						if err == nil {
-							appRootCAs = append(appRootCAs, id.IdBytes)
+							// check to see of this is an app org MSP
+							if _, ok := appOrgMSPs[k]; ok {
+								peerLogger.Debugf("adding app root CAs for MSP [%s]", k)
+								appRootCAs = append(appRootCAs, id.IdBytes)
+							} else {
+								peerLogger.Debugf("adding orderer root CAs for MSP [%s]", k)
+								ordererRootCAs = append(ordererRootCAs, id.IdBytes)
+							}
 						}
 					}
 				}
 			}
 		}
-		// TODO: separate app and orderer CAs
-		ordererRootCAs = appRootCAs
 		rootCASupport.AppRootCAsByChain[cid] = appRootCAs
 		rootCASupport.OrdererRootCAsByChain[cid] = ordererRootCAs
 	}
@@ -419,6 +438,12 @@ func buildTrustedRootsForChain(cm configtxapi.Manager) {
 func GetMSPIDs(cid string) []string {
 	chains.RLock()
 	defer chains.RUnlock()
+
+	//if mock is set, use it to return MSPIDs
+	//used for tests without a proper join
+	if mockMSPIDGetter != nil {
+		return mockMSPIDGetter(cid)
+	}
 	if c, ok := chains.list[cid]; ok {
 		if c == nil || c.cs == nil ||
 			c.cs.ApplicationConfig() == nil ||
@@ -452,17 +477,6 @@ func SetCurrConfigBlock(block *common.Block, cid string) error {
 		return nil
 	}
 	return fmt.Errorf("Chain %s doesn't exist on the peer", cid)
-}
-
-// createLedger function is used only for the testing (see function 'MockCreateChain').
-// TODO - this function should not be in this file which contains production code
-func createLedger(cid string) (ledger.PeerLedger, error) {
-	var ledger ledger.PeerLedger
-	if ledger = GetLedger(cid); ledger != nil {
-		return ledger, nil
-	}
-	gb, _ := configtxtest.MakeGenesisBlock(cid)
-	return ledgermgmt.CreateLedger(gb)
 }
 
 // NewPeerClientConnection Returns a new grpc.ClientConn to the configured local PEER.

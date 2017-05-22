@@ -258,8 +258,8 @@ func (cs *chainSupport) WriteBlock(block *cb.Block, committers []filter.Committe
 	if err != nil {
 		logger.Panicf("[channel: %s] Could not append block: %s", cs.ChainID(), err)
 	}
-
 	logger.Debugf("[channel: %s] Wrote block %d", cs.ChainID(), block.GetHeader().Number)
+
 	return block
 }
 

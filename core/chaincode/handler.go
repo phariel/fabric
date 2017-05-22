@@ -261,23 +261,6 @@ func (handler *Handler) checkACL(signedProp *pb.SignedProposal, proposal *pb.Pro
 	return handler.policyChecker.CheckPolicy(ccIns.ChainID, policies.ChannelApplicationWriters, signedProp)
 }
 
-//THIS CAN BE REMOVED ONCE WE FULL SUPPORT (Invoke) CONFIDENTIALITY WITH CC-CALLING-CC
-//Only invocation are allowed
-func (handler *Handler) canCallChaincode(txid string, isQuery bool) *pb.ChaincodeMessage {
-	var errMsg string
-	txctx := handler.getTxContext(txid)
-	if txctx == nil {
-		errMsg = fmt.Sprintf("[%s]Error no context while checking for confidentiality. Sending %s", shorttxid(txid), pb.ChaincodeMessage_ERROR)
-	}
-
-	if errMsg != "" {
-		return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: []byte(errMsg), Txid: txid}
-	}
-
-	//not CONFIDENTIAL transaction, OK to call CC
-	return nil
-}
-
 func (handler *Handler) deregister() error {
 	if handler.registered {
 		handler.chaincodeSupport.deregisterHandler(handler)
@@ -856,6 +839,13 @@ func (handler *Handler) handleQueryStateNext(msg *pb.ChaincodeMessage) {
 		}
 
 		txContext := handler.getTxContext(msg.Txid)
+		if txContext == nil {
+			payload := []byte("transaction context not found (timed out ?)")
+			chaincodeLogger.Errorf("[%s]Failed to get transaction context. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
+			return
+		}
+
 		queryIter := handler.getQueryIterator(txContext, queryStateNext.Id)
 
 		if queryIter == nil {
@@ -935,6 +925,13 @@ func (handler *Handler) handleQueryStateClose(msg *pb.ChaincodeMessage) {
 		}
 
 		txContext := handler.getTxContext(msg.Txid)
+		if txContext == nil {
+			payload := []byte("transaction context not found (timed out ?)")
+			chaincodeLogger.Errorf("[%s]Failed to get transaction context. Sending %s", shorttxid(msg.Txid), pb.ChaincodeMessage_ERROR)
+			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
+			return
+		}
+
 		iter := handler.getQueryIterator(txContext, queryStateClose.Id)
 		if iter != nil {
 			iter.Close()
@@ -1149,42 +1146,6 @@ func (handler *Handler) handleGetHistoryForKey(msg *pb.ChaincodeMessage) {
 		serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: payloadBytes, Txid: msg.Txid}
 
 	}()
-}
-
-// afterPutState handles a PUT_STATE request from the chaincode.
-func (handler *Handler) afterPutState(e *fsm.Event, state string) {
-	_, ok := e.Args[0].(*pb.ChaincodeMessage)
-	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
-		return
-	}
-	chaincodeLogger.Debugf("Received %s in state %s, invoking put state to ledger", pb.ChaincodeMessage_PUT_STATE, state)
-
-	// Put state into ledger handled within enterBusyState
-}
-
-// afterDelState handles a DEL_STATE request from the chaincode.
-func (handler *Handler) afterDelState(e *fsm.Event, state string) {
-	_, ok := e.Args[0].(*pb.ChaincodeMessage)
-	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
-		return
-	}
-	chaincodeLogger.Debugf("Received %s, invoking delete state from ledger", pb.ChaincodeMessage_DEL_STATE)
-
-	// Delete state from ledger handled within enterBusyState
-}
-
-// afterInvokeChaincode handles an INVOKE_CHAINCODE request from the chaincode.
-func (handler *Handler) afterInvokeChaincode(e *fsm.Event, state string) {
-	_, ok := e.Args[0].(*pb.ChaincodeMessage)
-	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
-		return
-	}
-	chaincodeLogger.Debugf("Received %s in state %s, invoking another chaincode", pb.ChaincodeMessage_INVOKE_CHAINCODE, state)
-
-	// Invoke another chaincode handled within enterBusyState
 }
 
 // Handles request to ledger to put state

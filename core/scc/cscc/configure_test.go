@@ -41,7 +41,6 @@ import (
 	"github.com/hyperledger/fabric/msp/mgmt/testtools"
 	peergossip "github.com/hyperledger/fabric/peer/gossip"
 	"github.com/hyperledger/fabric/peer/gossip/mocks"
-	"github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/spf13/viper"
@@ -91,6 +90,33 @@ func TestConfigerInit(t *testing.T) {
 	}
 }
 
+func TestConfigerInvokeInvalidParameters(t *testing.T) {
+	e := new(PeerConfiger)
+	stub := shim.NewMockStub("PeerConfiger", e)
+
+	res := stub.MockInit("1", nil)
+	assert.Equal(t, res.Status, int32(shim.OK), "Init failed")
+
+	res = stub.MockInvoke("2", nil)
+	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail having zero arguments")
+	assert.Equal(t, res.Message, "Incorrect number of arguments, 0")
+
+	args := [][]byte{[]byte("GetChannels")}
+	res = stub.MockInvokeWithSignedProposal("3", args, nil)
+	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
+	assert.Contains(t, res.Message, "failed authorization check")
+
+	args = [][]byte{[]byte("GetConfigBlock"), []byte("testChainID")}
+	res = stub.MockInvokeWithSignedProposal("4", args, nil)
+	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
+	assert.Contains(t, res.Message, "failed authorization check")
+
+	args = [][]byte{[]byte("fooFunction"), []byte("testChainID")}
+	res = stub.MockInvoke("5", args)
+	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected wrong function name provided")
+	assert.Equal(t, res.Message, "Requested function fooFunction not found.")
+}
+
 func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
 	viper.Set("peer.fileSystemPath", "/tmp/hyperledgertest/")
 	os.Mkdir("/tmp/hyperledgertest", 0755)
@@ -104,7 +130,7 @@ func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
 		t.FailNow()
 	}
 
-	// Failed path: Not enough parameters
+	// Failed path: expected to have at least one argument
 	args := [][]byte{[]byte("JoinChain")}
 	if res := stub.MockInvoke("2", args); res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain should have failed with invalid number of args: %v", args)
@@ -182,13 +208,19 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
 	sProp.Signature = sProp.ProposalBytes
+
+	// Try fail path with nil block
+	res := stub.MockInvokeWithSignedProposal("2", [][]byte{[]byte("JoinChain"), nil}, sProp)
+	assert.Equal(t, res.Status, int32(shim.ERROR))
+
+	// Now, continue with valid execution path
 	if res := stub.MockInvokeWithSignedProposal("2", args, sProp); res.Status != shim.OK {
 		t.Fatalf("cscc invoke JoinChain failed with: %v", res.Message)
 	}
 
 	// This call must fail
 	sProp.Signature = nil
-	res := stub.MockInvokeWithSignedProposal("3", args, sProp)
+	res = stub.MockInvokeWithSignedProposal("3", args, sProp)
 	if res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain must fail : %v", res.Message)
 	}
@@ -197,7 +229,7 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 
 	// Query the configuration block
 	//chainID := []byte{143, 222, 22, 192, 73, 145, 76, 110, 167, 154, 118, 66, 132, 204, 113, 168}
-	chainID, err := getChainID(blockBytes)
+	chainID, err := utils.GetChainIDFromBlockBytes(blockBytes)
 	if err != nil {
 		t.Fatalf("cscc invoke JoinChain failed with: %v", err)
 	}
@@ -274,7 +306,7 @@ func TestConfigerInvokeUpdateConfigBlock(t *testing.T) {
 
 	// Query the configuration block
 	//chainID := []byte{143, 222, 22, 192, 73, 145, 76, 110, 167, 154, 118, 66, 132, 204, 113, 168}
-	chainID, err := getChainID(blockBytes)
+	chainID, err := utils.GetChainIDFromBlockBytes(blockBytes)
 	if err != nil {
 		t.Fatalf("cscc invoke UpdateConfigBlock failed with: %v", err)
 	}
@@ -286,33 +318,10 @@ func TestConfigerInvokeUpdateConfigBlock(t *testing.T) {
 }
 
 func mockConfigBlock() []byte {
-	var blockBytes []byte
+	var blockBytes []byte = nil
 	block, err := configtxtest.MakeGenesisBlock("mytestchainid")
-	if err != nil {
-		blockBytes = nil
-	} else {
+	if err == nil {
 		blockBytes = utils.MarshalOrPanic(block)
 	}
 	return blockBytes
-}
-
-func getChainID(blockBytes []byte) (string, error) {
-	block := &common.Block{}
-	if err := proto.Unmarshal(blockBytes, block); err != nil {
-		return "", err
-	}
-	envelope := &common.Envelope{}
-	if err := proto.Unmarshal(block.Data.Data[0], envelope); err != nil {
-		return "", err
-	}
-	payload := &common.Payload{}
-	if err := proto.Unmarshal(envelope.Payload, payload); err != nil {
-		return "", err
-	}
-	chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
-	if err != nil {
-		return "", err
-	}
-	fmt.Printf("Channel id: %v\n", chdr.ChannelId)
-	return chdr.ChannelId, nil
 }

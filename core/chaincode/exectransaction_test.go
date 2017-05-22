@@ -69,6 +69,12 @@ func initPeer(chainIDs ...string) (net.Listener, error) {
 
 	peer.MockInitialize()
 
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	peer.MockSetMSPIDGetter(mspGetter)
+
 	var opts []grpc.ServerOption
 	if viper.GetBool("peer.tls.enabled") {
 		creds, err := credentials.NewServerTLSFromFile(config.GetPath("peer.tls.cert.file"), config.GetPath("peer.tls.key.file"))
@@ -637,11 +643,9 @@ func invokeExample02Transaction(ctxt context.Context, cccid *ccprovider.CCContex
 const (
 	chaincodeExample02GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02"
 	chaincodeExample04GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example04"
-	chaincodeExample05GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example05"
 	chaincodeEventSenderGolangPath = "github.com/hyperledger/fabric/examples/chaincode/go/eventsender"
 	chaincodeExample02JavaPath     = "../../examples/chaincode/java/chaincode_example02"
 	chaincodeExample04JavaPath     = "../../examples/chaincode/java/chaincode_example04"
-	chaincodeExample05JavaPath     = "../../examples/chaincode/java/chaincode_example05"
 	chaincodeExample06JavaPath     = "../../examples/chaincode/java/chaincode_example06"
 	chaincodeEventSenderJavaPath   = "../../examples/chaincode/java/eventsender"
 )
@@ -1141,6 +1145,28 @@ func TestQueries(t *testing.T) {
 		theChaincodeSupport.Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
 		return
 	}
+
+	//FAB-1163- The following range query should timeout and produce an error
+	//the peer should handle this gracefully and not die
+
+	//save the original timeout and set a new timeout of 1 sec
+	origTimeout := theChaincodeSupport.executetimeout
+	theChaincodeSupport.executetimeout = time.Duration(1) * time.Second
+
+	//chaincode to sleep for 2 secs with timeout 1
+	args = util.ToChaincodeArgs(f, "marble001", "marble002", "2000")
+
+	spec = &pb.ChaincodeSpec{Type: 1, ChaincodeId: cID, Input: &pb.ChaincodeInput{Args: args}}
+	_, _, retval, err = invoke(ctxt, chainID, spec, nextBlockNumber, nil)
+	if err == nil {
+		t.Fail()
+		t.Logf("expected timeout error but succeeded")
+		theChaincodeSupport.Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
+		return
+	}
+
+	//restore timeout
+	theChaincodeSupport.executetimeout = origTimeout
 
 	// querying for all marbles will return 101 marbles
 	// this query should return exactly 101 results (one call to Next())

@@ -16,20 +16,14 @@ limitations under the License.
 package sw
 
 import (
-	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rsa"
-	"crypto/x509"
-	"errors"
-	"fmt"
+	"crypto/sha256"
+	"crypto/sha512"
 	"hash"
 	"reflect"
 
-	"crypto/sha256"
-	"crypto/sha512"
-
 	"github.com/hyperledger/fabric/bccsp"
-	"github.com/hyperledger/fabric/bccsp/utils"
+	"github.com/hyperledger/fabric/common/errors"
 	"github.com/hyperledger/fabric/common/flogging"
 	"golang.org/x/crypto/sha3"
 )
@@ -43,7 +37,7 @@ var (
 func NewDefaultSecurityLevel(keyStorePath string) (bccsp.BCCSP, error) {
 	ks := &fileBasedKeyStore{}
 	if err := ks.Init(nil, keyStorePath, false); err != nil {
-		return nil, fmt.Errorf("Failed initializing key store [%s]", err)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed initializing key store at [%v]", keyStorePath).WrapError(err)
 	}
 
 	return New(256, "SHA2", ks)
@@ -62,12 +56,12 @@ func New(securityLevel int, hashFamily string, keyStore bccsp.KeyStore) (bccsp.B
 	conf := &config{}
 	err := conf.setSecurityLevel(securityLevel, hashFamily)
 	if err != nil {
-		return nil, fmt.Errorf("Failed initializing configuration [%s]", err)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed initializing configuration at [%v,%v]", securityLevel, hashFamily).WrapError(err)
 	}
 
 	// Check KeyStore
 	if keyStore == nil {
-		return nil, errors.New("Invalid bccsp.KeyStore instance. It must be different from nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid bccsp.KeyStore instance. It must be different from nil.")
 	}
 
 	// Set the encryptors
@@ -130,6 +124,18 @@ func New(securityLevel int, hashFamily string, keyStore bccsp.KeyStore) (bccsp.B
 	keyDerivers[reflect.TypeOf(&aesPrivateKey{})] = &aesPrivateKeyKeyDeriver{bccsp: impl}
 	impl.keyDerivers = keyDerivers
 
+	// Set the key importers
+	keyImporters := make(map[reflect.Type]KeyImporter)
+	keyImporters[reflect.TypeOf(&bccsp.AES256ImportKeyOpts{})] = &aes256ImportKeyOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.HMACImportKeyOpts{})] = &hmacImportKeyOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.ECDSAPKIXPublicKeyImportOpts{})] = &ecdsaPKIXPublicKeyImportOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.ECDSAPrivateKeyImportOpts{})] = &ecdsaPrivateKeyImportOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.ECDSAGoPublicKeyImportOpts{})] = &ecdsaGoPublicKeyImportOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.RSAGoPublicKeyImportOpts{})] = &rsaGoPublicKeyImportOptsKeyImporter{}
+	keyImporters[reflect.TypeOf(&bccsp.X509PublicKeyImportOpts{})] = &x509PublicKeyImportOptsKeyImporter{bccsp: impl}
+
+	impl.keyImporters = keyImporters
+
 	return impl, nil
 }
 
@@ -140,6 +146,7 @@ type impl struct {
 
 	keyGenerators map[reflect.Type]KeyGenerator
 	keyDerivers   map[reflect.Type]KeyDeriver
+	keyImporters  map[reflect.Type]KeyImporter
 	encryptors    map[reflect.Type]Encryptor
 	decryptors    map[reflect.Type]Decryptor
 	signers       map[reflect.Type]Signer
@@ -151,17 +158,17 @@ type impl struct {
 func (csp *impl) KeyGen(opts bccsp.KeyGenOpts) (k bccsp.Key, err error) {
 	// Validate arguments
 	if opts == nil {
-		return nil, errors.New("Invalid Opts parameter. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Opts parameter. It must not be nil.")
 	}
 
 	keyGenerator, found := csp.keyGenerators[reflect.TypeOf(opts)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'KeyGenOpts' provided [%v]", opts)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'KeyGenOpts' provided [%v]", opts)
 	}
 
 	k, err = keyGenerator.KeyGen(opts)
 	if err != nil {
-		return nil, err
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed generating key with opts [%v]", opts).WrapError(err)
 	}
 
 	// If the key is not Ephemeral, store it.
@@ -169,7 +176,7 @@ func (csp *impl) KeyGen(opts bccsp.KeyGenOpts) (k bccsp.Key, err error) {
 		// Store the key
 		err = csp.ks.StoreKey(k)
 		if err != nil {
-			return nil, fmt.Errorf("Failed storing key [%s]. [%s]", opts.Algorithm(), err)
+			return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed storing key [%s]. [%s]", opts.Algorithm(), err)
 		}
 	}
 
@@ -181,20 +188,20 @@ func (csp *impl) KeyGen(opts bccsp.KeyGenOpts) (k bccsp.Key, err error) {
 func (csp *impl) KeyDeriv(k bccsp.Key, opts bccsp.KeyDerivOpts) (dk bccsp.Key, err error) {
 	// Validate arguments
 	if k == nil {
-		return nil, errors.New("Invalid Key. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Key. It must not be nil.")
 	}
 	if opts == nil {
-		return nil, errors.New("Invalid opts. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid opts. It must not be nil.")
 	}
 
 	keyDeriver, found := csp.keyDerivers[reflect.TypeOf(k)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'Key' provided [%v]", k)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'Key' provided [%v]", k)
 	}
 
 	k, err = keyDeriver.KeyDeriv(k, opts)
 	if err != nil {
-		return nil, err
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed deriving key with opts [%v]", opts).WrapError(err)
 	}
 
 	// If the key is not Ephemeral, store it.
@@ -202,7 +209,7 @@ func (csp *impl) KeyDeriv(k bccsp.Key, opts bccsp.KeyDerivOpts) (dk bccsp.Key, e
 		// Store the key
 		err = csp.ks.StoreKey(k)
 		if err != nil {
-			return nil, fmt.Errorf("Failed storing key [%s]. [%s]", opts.Algorithm(), err)
+			return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed storing key [%s]. [%s]", opts.Algorithm(), err)
 		}
 	}
 
@@ -214,206 +221,63 @@ func (csp *impl) KeyDeriv(k bccsp.Key, opts bccsp.KeyDerivOpts) (dk bccsp.Key, e
 func (csp *impl) KeyImport(raw interface{}, opts bccsp.KeyImportOpts) (k bccsp.Key, err error) {
 	// Validate arguments
 	if raw == nil {
-		return nil, errors.New("Invalid raw. Cannot be nil")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid raw. It must not be nil.")
 	}
-
 	if opts == nil {
-		return nil, errors.New("Invalid Opts parameter. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid opts. It must not be nil.")
 	}
 
-	switch opts.(type) {
-
-	case *bccsp.AES256ImportKeyOpts:
-		aesRaw, ok := raw.([]byte)
-		if !ok {
-			return nil, errors.New("[AES256ImportKeyOpts] Invalid raw material. Expected byte array.")
-		}
-
-		if len(aesRaw) != 32 {
-			return nil, fmt.Errorf("[AES256ImportKeyOpts] Invalid Key Length [%d]. Must be 32 bytes", len(aesRaw))
-		}
-
-		aesK := &aesPrivateKey{utils.Clone(aesRaw), false}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(aesK)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing AES key [%s]", err)
-			}
-		}
-
-		return aesK, nil
-
-	case *bccsp.HMACImportKeyOpts:
-		aesRaw, ok := raw.([]byte)
-		if !ok {
-			return nil, errors.New("[HMACImportKeyOpts] Invalid raw material. Expected byte array.")
-		}
-
-		if len(aesRaw) == 0 {
-			return nil, errors.New("[HMACImportKeyOpts] Invalid raw. It must not be nil.")
-		}
-
-		aesK := &aesPrivateKey{utils.Clone(aesRaw), false}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(aesK)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing AES key [%s]", err)
-			}
-		}
-
-		return aesK, nil
-
-	case *bccsp.ECDSAPKIXPublicKeyImportOpts:
-		der, ok := raw.([]byte)
-		if !ok {
-			return nil, errors.New("[ECDSAPKIXPublicKeyImportOpts] Invalid raw material. Expected byte array.")
-		}
-
-		if len(der) == 0 {
-			return nil, errors.New("[ECDSAPKIXPublicKeyImportOpts] Invalid raw. It must not be nil.")
-		}
-
-		lowLevelKey, err := utils.DERToPublicKey(der)
-		if err != nil {
-			return nil, fmt.Errorf("Failed converting PKIX to ECDSA public key [%s]", err)
-		}
-
-		ecdsaPK, ok := lowLevelKey.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, errors.New("Failed casting to ECDSA public key. Invalid raw material.")
-		}
-
-		k = &ecdsaPublicKey{ecdsaPK}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(k)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing ECDSA key [%s]", err)
-			}
-		}
-
-		return k, nil
-
-	case *bccsp.ECDSAPrivateKeyImportOpts:
-		der, ok := raw.([]byte)
-		if !ok {
-			return nil, errors.New("[ECDSADERPrivateKeyImportOpts] Invalid raw material. Expected byte array.")
-		}
-
-		if len(der) == 0 {
-			return nil, errors.New("[ECDSADERPrivateKeyImportOpts] Invalid raw. It must not be nil.")
-		}
-
-		lowLevelKey, err := utils.DERToPrivateKey(der)
-		if err != nil {
-			return nil, fmt.Errorf("Failed converting PKIX to ECDSA public key [%s]", err)
-		}
-
-		ecdsaSK, ok := lowLevelKey.(*ecdsa.PrivateKey)
-		if !ok {
-			return nil, errors.New("Failed casting to ECDSA public key. Invalid raw material.")
-		}
-
-		k = &ecdsaPrivateKey{ecdsaSK}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(k)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing ECDSA key [%s]", err)
-			}
-		}
-
-		return k, nil
-
-	case *bccsp.ECDSAGoPublicKeyImportOpts:
-		lowLevelKey, ok := raw.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, errors.New("[ECDSAGoPublicKeyImportOpts] Invalid raw material. Expected *ecdsa.PublicKey.")
-		}
-
-		k = &ecdsaPublicKey{lowLevelKey}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(k)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing ECDSA key [%s]", err)
-			}
-		}
-
-		return k, nil
-
-	case *bccsp.RSAGoPublicKeyImportOpts:
-		lowLevelKey, ok := raw.(*rsa.PublicKey)
-		if !ok {
-			return nil, errors.New("[RSAGoPublicKeyImportOpts] Invalid raw material. Expected *rsa.PublicKey.")
-		}
-
-		k = &rsaPublicKey{lowLevelKey}
-
-		// If the key is not Ephemeral, store it.
-		if !opts.Ephemeral() {
-			// Store the key
-			err = csp.ks.StoreKey(k)
-			if err != nil {
-				return nil, fmt.Errorf("Failed storing RSA publi key [%s]", err)
-			}
-		}
-
-		return k, nil
-
-	case *bccsp.X509PublicKeyImportOpts:
-		x509Cert, ok := raw.(*x509.Certificate)
-		if !ok {
-			return nil, errors.New("[X509PublicKeyImportOpts] Invalid raw material. Expected *x509.Certificate.")
-		}
-
-		pk := x509Cert.PublicKey
-
-		switch pk.(type) {
-		case *ecdsa.PublicKey:
-			return csp.KeyImport(pk, &bccsp.ECDSAGoPublicKeyImportOpts{Temporary: opts.Ephemeral()})
-		case *rsa.PublicKey:
-			return csp.KeyImport(pk, &bccsp.RSAGoPublicKeyImportOpts{Temporary: opts.Ephemeral()})
-		default:
-			return nil, errors.New("Certificate public key type not recognized. Supported keys: [ECDSA, RSA]")
-		}
-
-	default:
-		return nil, fmt.Errorf("Unsupported 'KeyImportOptions' provided [%v]", opts)
+	keyImporter, found := csp.keyImporters[reflect.TypeOf(opts)]
+	if !found {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'KeyImportOpts' provided [%v]", opts)
 	}
+
+	k, err = keyImporter.KeyImport(raw, opts)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed importing key with opts [%v]", opts).WrapError(err)
+	}
+
+	// If the key is not Ephemeral, store it.
+	if !opts.Ephemeral() {
+		// Store the key
+		err = csp.ks.StoreKey(k)
+		if err != nil {
+			return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed storing imported key with opts [%v]", opts).WrapError(err)
+		}
+	}
+
+	return
 }
 
 // GetKey returns the key this CSP associates to
 // the Subject Key Identifier ski.
 func (csp *impl) GetKey(ski []byte) (k bccsp.Key, err error) {
-	return csp.ks.GetKey(ski)
+	k, err = csp.ks.GetKey(ski)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed getting key for SKI [%v]", ski).WrapError(err)
+	}
+
+	return
 }
 
 // Hash hashes messages msg using options opts.
 func (csp *impl) Hash(msg []byte, opts bccsp.HashOpts) (digest []byte, err error) {
 	// Validate arguments
 	if opts == nil {
-		return nil, errors.New("Invalid opts. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid opts. It must not be nil.")
 	}
 
 	hasher, found := csp.hashers[reflect.TypeOf(opts)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'HashOpt' provided [%v]", opts)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'HashOpt' provided [%v]", opts)
 	}
 
-	return hasher.Hash(msg, opts)
+	digest, err = hasher.Hash(msg, opts)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed hashing with opts [%v]", opts).WrapError(err)
+	}
+
+	return
 }
 
 // GetHash returns and instance of hash.Hash using options opts.
@@ -421,15 +285,20 @@ func (csp *impl) Hash(msg []byte, opts bccsp.HashOpts) (digest []byte, err error
 func (csp *impl) GetHash(opts bccsp.HashOpts) (h hash.Hash, err error) {
 	// Validate arguments
 	if opts == nil {
-		return nil, errors.New("Invalid opts. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid opts. It must not be nil.")
 	}
 
 	hasher, found := csp.hashers[reflect.TypeOf(opts)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'HashOpt' provided [%v]", opts)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'HashOpt' provided [%v]", opts)
 	}
 
-	return hasher.GetHash(opts)
+	h, err = hasher.GetHash(opts)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed getting hash function with opts [%v]", opts).WrapError(err)
+	}
+
+	return
 }
 
 // Sign signs digest using key k.
@@ -441,40 +310,49 @@ func (csp *impl) GetHash(opts bccsp.HashOpts) (h hash.Hash, err error) {
 func (csp *impl) Sign(k bccsp.Key, digest []byte, opts bccsp.SignerOpts) (signature []byte, err error) {
 	// Validate arguments
 	if k == nil {
-		return nil, errors.New("Invalid Key. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Key. It must not be nil.")
 	}
 	if len(digest) == 0 {
-		return nil, errors.New("Invalid digest. Cannot be empty.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid digest. Cannot be empty.")
 	}
 
 	signer, found := csp.signers[reflect.TypeOf(k)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'SignKey' provided [%v]", k)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'SignKey' provided [%v]", k)
 	}
 
-	return signer.Sign(k, digest, opts)
+	signature, err = signer.Sign(k, digest, opts)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed signing with opts [%v]", opts).WrapError(err)
+	}
+
+	return
 }
 
 // Verify verifies signature against key k and digest
 func (csp *impl) Verify(k bccsp.Key, signature, digest []byte, opts bccsp.SignerOpts) (valid bool, err error) {
 	// Validate arguments
 	if k == nil {
-		return false, errors.New("Invalid Key. It must not be nil.")
+		return false, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Key. It must not be nil.")
 	}
 	if len(signature) == 0 {
-		return false, errors.New("Invalid signature. Cannot be empty.")
+		return false, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid signature. Cannot be empty.")
 	}
 	if len(digest) == 0 {
-		return false, errors.New("Invalid digest. Cannot be empty.")
+		return false, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid digest. Cannot be empty.")
 	}
 
 	verifier, found := csp.verifiers[reflect.TypeOf(k)]
 	if !found {
-		return false, fmt.Errorf("Unsupported 'VerifyKey' provided [%v]", k)
+		return false, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'VerifyKey' provided [%v]", k)
 	}
 
-	return verifier.Verify(k, signature, digest, opts)
+	valid, err = verifier.Verify(k, signature, digest, opts)
+	if err != nil {
+		return false, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed verifing with opts [%v]", opts).WrapError(err)
+	}
 
+	return
 }
 
 // Encrypt encrypts plaintext using key k.
@@ -482,12 +360,12 @@ func (csp *impl) Verify(k bccsp.Key, signature, digest []byte, opts bccsp.Signer
 func (csp *impl) Encrypt(k bccsp.Key, plaintext []byte, opts bccsp.EncrypterOpts) (ciphertext []byte, err error) {
 	// Validate arguments
 	if k == nil {
-		return nil, errors.New("Invalid Key. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Key. It must not be nil.")
 	}
 
 	encryptor, found := csp.encryptors[reflect.TypeOf(k)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'EncryptKey' provided [%v]", k)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'EncryptKey' provided [%v]", k)
 	}
 
 	return encryptor.Encrypt(k, plaintext, opts)
@@ -498,13 +376,18 @@ func (csp *impl) Encrypt(k bccsp.Key, plaintext []byte, opts bccsp.EncrypterOpts
 func (csp *impl) Decrypt(k bccsp.Key, ciphertext []byte, opts bccsp.DecrypterOpts) (plaintext []byte, err error) {
 	// Validate arguments
 	if k == nil {
-		return nil, errors.New("Invalid Key. It must not be nil.")
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.BadRequest, "Invalid Key. It must not be nil.")
 	}
 
 	decryptor, found := csp.decryptors[reflect.TypeOf(k)]
 	if !found {
-		return nil, fmt.Errorf("Unsupported 'DecryptKey' provided [%v]", k)
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.NotFound, "Unsupported 'DecryptKey' provided [%v]", k)
 	}
 
-	return decryptor.Decrypt(k, ciphertext, opts)
+	plaintext, err = decryptor.Decrypt(k, ciphertext, opts)
+	if err != nil {
+		return nil, errors.ErrorWithCallstack(errors.BCCSP, errors.Internal, "Failed decrypting with opts [%v]", opts).WrapError(err)
+	}
+
+	return
 }

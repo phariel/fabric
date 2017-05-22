@@ -30,7 +30,11 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
-const channelFuncName = "channel"
+const (
+	channelFuncName = "channel"
+	shortDes        = "Operate a channel: create|fetch|join|list."
+	longDes         = "Operate a channel: create|fetch|join|list."
+)
 
 var (
 	// join related variables.
@@ -42,6 +46,7 @@ var (
 	orderingEndpoint string
 	tls              bool
 	caFile           string
+	timeout          int
 )
 
 // Cmd returns the cobra command for Node
@@ -66,12 +71,13 @@ func AddFlags(cmd *cobra.Command) {
 	flags.StringVarP(&orderingEndpoint, "orderer", "o", "", "Ordering service endpoint")
 	flags.BoolVarP(&tls, "tls", "", false, "Use TLS when communicating with the orderer endpoint")
 	flags.StringVarP(&caFile, "cafile", "", "", "Path to file containing PEM-encoded trusted certificate(s) for the ordering endpoint")
+	flags.IntVarP(&timeout, "timeout", "t", 5, "Channel creation timeout")
 }
 
 var channelCmd = &cobra.Command{
 	Use:   channelFuncName,
-	Short: fmt.Sprintf("%s specific commands.", channelFuncName),
-	Long:  fmt.Sprintf("%s specific commands.", channelFuncName),
+	Short: fmt.Sprint(shortDes),
+	Long:  fmt.Sprint(longDes),
 }
 
 type BroadcastClientFactory func() (common.BroadcastClient, error)
@@ -136,7 +142,7 @@ func InitCmdFactory(isOrdererRequired bool) (*ChannelCmdFactory, error) {
 			return nil, err
 		}
 
-		cmdFact.DeliverClient = newDeliverClient(client, chainID)
+		cmdFact.DeliverClient = newDeliverClient(conn, client, chainID)
 	}
 
 	return cmdFact, nil
