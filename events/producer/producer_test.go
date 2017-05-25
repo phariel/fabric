@@ -39,7 +39,7 @@ import (
 	mmsp "github.com/hyperledger/fabric/common/mocks/msp"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/config"
-	"github.com/hyperledger/fabric/events"
+	coreutil "github.com/hyperledger/fabric/core/testutil"
 	"github.com/hyperledger/fabric/events/consumer"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
@@ -402,9 +402,6 @@ func TestUnregister(t *testing.T) {
 }
 
 func TestNewEventsServer(t *testing.T) {
-	viper.Set("peer.events.buffersize", 100)
-	viper.Set("peer.events.timeout", 0)
-
 	doubleCreation := func() {
 		NewEventsServer(
 			uint(viper.GetInt("peer.events.buffersize")),
@@ -476,7 +473,6 @@ var signer msp.SigningIdentity
 var signerSerialized []byte
 
 func TestMain(m *testing.M) {
-	os.Exit(0)
 	// setup crypto algorithms
 	// setup the MSP manager so that we can sign/verify
 	err := msptesttools.LoadMSPSetupForTesting()
@@ -499,7 +495,7 @@ func TestMain(m *testing.M) {
 		os.Exit(-1)
 		return
 	}
-	events.SetupTestConfig()
+	coreutil.SetupTestConfig()
 	var opts []grpc.ServerOption
 	if viper.GetBool("peer.tls.enabled") {
 		creds, err := credentials.NewServerTLSFromFile(config.GetPath("peer.tls.cert.file"), config.GetPath("peer.tls.key.file"))
@@ -522,6 +518,9 @@ func TestMain(m *testing.M) {
 
 	// Register EventHub server
 	// use a buffer of 100 and blocking timeout
+	viper.Set("peer.events.buffersize", 100)
+	viper.Set("peer.events.timeout", 0)
+
 	ehServer = NewEventsServer(
 		uint(viper.GetInt("peer.events.buffersize")),
 		viper.GetDuration("peer.events.timeout"))

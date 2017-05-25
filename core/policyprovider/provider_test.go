@@ -14,24 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package core
+package policyprovider
 
 import (
 	"testing"
 
+	"github.com/hyperledger/fabric/core/policy"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestConfig(t *testing.T) {
-	// initialize configuration cached with security still disabled
-	configurationCached = true
-	assert.False(t, SecurityEnabled(), "security should not be enabled")
+func TestGetPolicyChecker(t *testing.T) {
+	// Ensure GetPolicyChecker implements policy.PolicyChecker
+	var pc policy.PolicyChecker
+	pc = GetPolicyChecker()
+	assert.NotNil(t, pc)
+}
 
-	// reset configuration cached
-	configurationCached = false
-	assert.True(t, SecurityEnabled(), "security should be enabled")
-
-	cacheConfiguration()
-	assert.True(t, SecurityEnabled(), "security should still be enabled")
-
+func TestDefaultFactory_NewPolicyChecker(t *testing.T) {
+	// Ensure defaultFactory implements policy.PolicyCheckerFactory
+	var pcf policy.PolicyCheckerFactory
+	pcf = &defaultFactory{}
+	var pc policy.PolicyChecker
+	// Check we can obtain a new policyChecker
+	pc = pcf.NewPolicyChecker()
+	assert.NotNil(t, pc)
 }
